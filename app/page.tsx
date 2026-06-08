@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type GameMode = "WINNER" | "LOSER";
 type Screen = "setup" | "race" | "result";
+type CameraMode = "follow" | "fixed";
 
 type Participant = {
   id: number;
@@ -18,8 +19,12 @@ type RaceBall = {
   color: string;
   x: number;
   y: number;
+  prevX: number;
+  prevY: number;
   vx: number;
   vy: number;
+  angle: number;
+  angularVelocity: number;
   seed: number;
   branchChoices: number[];
   jumpHits: boolean[];
@@ -139,22 +144,50 @@ type SectionLabel = {
   tone: "start" | "branch" | "spinner" | "hammer" | "jump" | "platform" | "finish";
 };
 
+type TrackZone = {
+  title: string;
+  subtitle: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  border: string;
+  background: string;
+  text: string;
+};
+
+type TrackPath = {
+  title: string;
+  d: string;
+  color: string;
+  width: number;
+};
+
 const MAP_WIDTH = 960;
 const MAP_HEIGHT = 7600;
 const VIEW_HEIGHT = 720;
 const FINISH_Y = 7350;
 const BALL_RADIUS = 16;
-const GRAVITY = 0.066;
+const VISUAL_BALL_SIZE = 44;
+const GRAVITY = 0.08;
 const FRICTION = 0.982;
 const DAMPING = 0.994;
 const BUMPER_RESTITUTION = 0.52;
 const MAX_HORIZONTAL_SPEED = 1.65;
 const MAX_FALL_SPEED = 5.1;
-const CAMERA_FOLLOW = 0.32;
-const CAMERA_DEADZONE = 0;
+const CAMERA_FOLLOW = 0.18;
+const CAMERA_DEADZONE = 120;
+const CAMERA_TARGET_SMOOTHING = 0.14;
+const CAMERA_MAX_STEP = 24;
+const CAMERA_VIEW_ANCHOR = 0.48;
 const PHYSICS_STEP = 1000 / 60;
+const SOLVER_ITERATIONS = 2;
+const CCD_SAMPLES: number = 3;
+const ROLLING_RESISTANCE = 0.992;
+const ANGULAR_DAMPING = 0.965;
+const MICRO_VELOCITY_EPSILON = 0.025;
 const WALL_X = 62;
-const MAX_BALLS = 80;
+const MAX_BALLS = 100;
 
 const COLORS = [
   "#e11d48",
@@ -167,102 +200,253 @@ const COLORS = [
   "#4f46e5",
 ];
 
+const TRACK_PATHS: TrackPath[] = [
+  {
+    title: "A early route",
+    d: "M480 210 C360 430 170 520 170 920 C170 1230 210 1590 410 1900",
+    color: "#ef4444",
+    width: 86,
+  },
+  {
+    title: "B early route",
+    d: "M480 210 C470 500 480 850 480 1260 C480 1510 480 1750 480 1900",
+    color: "#3b82f6",
+    width: 86,
+  },
+  {
+    title: "C early route",
+    d: "M480 210 C640 430 790 540 790 960 C790 1320 760 1650 550 1900",
+    color: "#8b5cf6",
+    width: 86,
+  },
+  {
+    title: "merge",
+    d: "M410 1900 C430 2060 450 2240 480 2660 M550 1900 C520 2060 500 2240 480 2660",
+    color: "#22c55e",
+    width: 82,
+  },
+  {
+    title: "s course",
+    d: "M480 2660 C190 2860 190 3180 480 3420 C770 3660 770 3920 480 4180",
+    color: "#38bdf8",
+    width: 92,
+  },
+  {
+    title: "fast late route",
+    d: "M480 4180 C320 4300 180 4480 180 4860 C180 5260 310 5520 410 5700",
+    color: "#ef4444",
+    width: 86,
+  },
+  {
+    title: "safe late route",
+    d: "M480 4180 C480 4480 480 4950 480 5700",
+    color: "#3b82f6",
+    width: 86,
+  },
+  {
+    title: "chaos late route",
+    d: "M480 4180 C680 4300 805 4580 780 5060 C760 5420 610 5580 550 5700",
+    color: "#8b5cf6",
+    width: 86,
+  },
+  {
+    title: "bottleneck",
+    d: "M410 5700 C455 5900 465 6220 480 6460 M550 5700 C510 5900 495 6220 480 6460",
+    color: "#facc15",
+    width: 78,
+  },
+  {
+    title: "scramble",
+    d: "M480 6460 C250 6580 260 7040 480 7220 C700 7040 700 6580 480 6460",
+    color: "#a855f7",
+    width: 82,
+  },
+  {
+    title: "finish",
+    d: "M480 7220 L480 7350",
+    color: "#e5e7eb",
+    width: 90,
+  },
+];
+
+const TRACK_ZONES: TrackZone[] = [
+  {
+    title: "A",
+    subtitle: "FAST / RISK",
+    x: 96,
+    y: 760,
+    width: 248,
+    height: 1140,
+    border: "#b91c1c",
+    background: "rgba(254, 226, 226, 0.52)",
+    text: "#991b1b",
+  },
+  {
+    title: "B",
+    subtitle: "SAFE",
+    x: 356,
+    y: 760,
+    width: 248,
+    height: 1140,
+    border: "#2563eb",
+    background: "rgba(219, 234, 254, 0.5)",
+    text: "#1d4ed8",
+  },
+  {
+    title: "C",
+    subtitle: "CHAOS",
+    x: 616,
+    y: 760,
+    width: 248,
+    height: 1140,
+    border: "#7c3aed",
+    background: "rgba(243, 232, 255, 0.52)",
+    text: "#6d28d9",
+  },
+  {
+    title: "MERGE ZONE",
+    subtitle: "FIRST PASSING FIGHT",
+    x: 260,
+    y: 1900,
+    width: 440,
+    height: 760,
+    border: "#171717",
+    background: "rgba(255, 255, 255, 0.64)",
+    text: "#171717",
+  },
+  {
+    title: "S COURSE",
+    subtitle: "LEFT / RIGHT / LEFT / RIGHT",
+    x: 120,
+    y: 2660,
+    width: 720,
+    height: 1520,
+    border: "#0f766e",
+    background: "rgba(204, 251, 241, 0.36)",
+    text: "#0f766e",
+  },
+  {
+    title: "FAST",
+    subtitle: "SHORT / DANGER",
+    x: 96,
+    y: 4180,
+    width: 248,
+    height: 1520,
+    border: "#b91c1c",
+    background: "rgba(254, 226, 226, 0.48)",
+    text: "#991b1b",
+  },
+  {
+    title: "SAFE",
+    subtitle: "AVERAGE",
+    x: 356,
+    y: 4180,
+    width: 248,
+    height: 1520,
+    border: "#2563eb",
+    background: "rgba(219, 234, 254, 0.45)",
+    text: "#1d4ed8",
+  },
+  {
+    title: "CHAOS",
+    subtitle: "LONG / VARIABLE",
+    x: 616,
+    y: 4180,
+    width: 248,
+    height: 1520,
+    border: "#7c3aed",
+    background: "rgba(243, 232, 255, 0.48)",
+    text: "#6d28d9",
+  },
+  {
+    title: "BOTTLENECK",
+    subtitle: "TOP5 MUST MEET",
+    x: 382,
+    y: 5700,
+    width: 196,
+    height: 760,
+    border: "#b45309",
+    background: "rgba(254, 243, 199, 0.62)",
+    text: "#92400e",
+  },
+  {
+    title: "SCRAMBLE",
+    subtitle: "FINAL BATTLE",
+    x: 220,
+    y: 6460,
+    width: 520,
+    height: 760,
+    border: "#b91c1c",
+    background: "rgba(254, 226, 226, 0.42)",
+    text: "#991b1b",
+  },
+];
+
 const BRANCHES: Branch[] = [
-  { y: 620, height: 520, leftTarget: 225, centerTarget: 480, rightTarget: 735 },
-  { y: 2260, height: 600, leftTarget: 250, centerTarget: 505, rightTarget: 710 },
-  { y: 4860, height: 620, leftTarget: 225, centerTarget: 485, rightTarget: 730 },
-  { y: 6250, height: 520, leftTarget: 255, centerTarget: 485, rightTarget: 705 },
+  { y: 760, height: 1140, leftTarget: 180, centerTarget: 480, rightTarget: 780 },
+  { y: 4180, height: 1520, leftTarget: 180, centerTarget: 480, rightTarget: 780 },
+  { y: 5700, height: 760, leftTarget: 410, centerTarget: 480, rightTarget: 550 },
 ];
 
 const BUMPERS: Bumper[] = [
-  { x: 480, y: 1120, r: 58 },
-  { x: 305, y: 1680, r: 48 },
-  { x: 635, y: 1740, r: 52 },
-  { x: 500, y: 2820, r: 56 },
-  { x: 350, y: 3500, r: 50 },
-  { x: 665, y: 4680, r: 42 },
-  { x: 480, y: 5440, r: 58 },
-  { x: 330, y: 6420, r: 50 },
-  { x: 690, y: 6710, r: 44 },
-  { x: 480, y: 7080, r: 52 },
+  { x: 210, y: 1180, r: 38 },
+  { x: 260, y: 1560, r: 36 },
+  { x: 760, y: 1380, r: 38 },
+  { x: 410, y: 2160, r: 40 },
+  { x: 550, y: 2340, r: 40 },
+  { x: 220, y: 4720, r: 36 },
+  { x: 770, y: 5120, r: 38 },
+  { x: 480, y: 6080, r: 42 },
+  { x: 330, y: 6700, r: 30 },
+  { x: 620, y: 6860, r: 30 },
+  { x: 480, y: 7040, r: 32 },
 ];
 
 const SPINNERS: Spinner[] = [
-  { x: 480, y: 1540, length: 360, speed: 0.0048 },
-  { x: 480, y: 1930, length: 420, speed: -0.0042 },
-  { x: 480, y: 3350, length: 330, speed: 0.0038 },
-  { x: 480, y: 5740, length: 390, speed: 0.0052 },
-  { x: 480, y: 6900, length: 340, speed: -0.0045 },
+  { x: 480, y: 3440, length: 300, speed: 0.0039 },
 ];
 
 const HAMMERS: Hammer[] = [
-  { x: 285, y: 3300, length: 250, speed: 0.0046, phase: 0.3 },
-  { x: 675, y: 3810, length: 270, speed: -0.0049, phase: 1.8 },
-  { x: 520, y: 6660, length: 300, speed: 0.0054, phase: 0.8 },
 ];
 
 const PLATFORMS: Platform[] = [
-  { y: 4380, width: 320, speed: 0.0028, phase: 0.1 },
-  { y: 4620, width: 260, speed: -0.0033, phase: 1.2 },
 ];
 
 const JUMP_ZONES: JumpZone[] = [
-  { x: 190, y: 4010, width: 210, forceX: 2.1, forceY: -2.2 },
-  { x: 555, y: 4010, width: 230, forceX: -2.0, forceY: -2.0 },
-  { x: 360, y: 6820, width: 240, forceX: 1.5, forceY: -1.8 },
+  { x: 130, y: 1020, width: 190, forceX: 1.15, forceY: -1.25 },
+  { x: 130, y: 4440, width: 190, forceX: 1.2, forceY: -1.35 },
 ];
 
 const GUIDE_BARS: GuideBar[] = [
-  { x1: 140, y1: 790, x2: 370, y2: 855, force: 0.13 },
-  { x1: 820, y1: 790, x2: 590, y2: 855, force: 0.13 },
-  { x1: 145, y1: 1345, x2: 395, y2: 1410, force: 0.14 },
-  { x1: 810, y1: 1345, x2: 560, y2: 1410, force: 0.14 },
-  { x1: 150, y1: 2500, x2: 385, y2: 2570, force: 0.15 },
-  { x1: 815, y1: 2500, x2: 580, y2: 2570, force: 0.15 },
-  { x1: 150, y1: 3085, x2: 430, y2: 3150, force: 0.13 },
-  { x1: 810, y1: 3085, x2: 560, y2: 3155, force: 0.13 },
-  { x1: 135, y1: 5235, x2: 385, y2: 5305, force: 0.14 },
-  { x1: 825, y1: 5235, x2: 580, y2: 5305, force: 0.14 },
-  { x1: 155, y1: 6140, x2: 410, y2: 6210, force: 0.13 },
-  { x1: 810, y1: 6140, x2: 555, y2: 6210, force: 0.13 },
-  { x1: 155, y1: 6520, x2: 390, y2: 6585, force: 0.12 },
-  { x1: 810, y1: 6540, x2: 575, y2: 6605, force: 0.12 },
-  { x1: 140, y1: 6885, x2: 380, y2: 6950, force: 0.13 },
-  { x1: 820, y1: 6900, x2: 585, y2: 6965, force: 0.13 },
-  { x1: 170, y1: 7200, x2: 430, y2: 7255, force: 0.11 },
-  { x1: 790, y1: 7210, x2: 545, y2: 7265, force: 0.11 },
+  { x1: 370, y1: 1040, x2: 590, y2: 1110, force: 0.11 },
+  { x1: 590, y1: 1540, x2: 370, y2: 1610, force: 0.11 },
+  { x1: 145, y1: 2860, x2: 760, y2: 3040, force: 0.12 },
+  { x1: 805, y1: 3260, x2: 190, y2: 3440, force: 0.12 },
+  { x1: 145, y1: 3660, x2: 760, y2: 3840, force: 0.12 },
+  { x1: 370, y1: 4780, x2: 590, y2: 4850, force: 0.11 },
+  { x1: 180, y1: 5880, x2: 420, y2: 5960, force: 0.1 },
+  { x1: 780, y1: 5880, x2: 540, y2: 5960, force: 0.1 },
 ];
 
-const C_TRAPS: CTrap[] = [
-  { x: 250, y: 2060, r: 92, open: "right" },
-  { x: 700, y: 3640, r: 96, open: "left" },
-  { x: 710, y: 5480, r: 82, open: "left" },
-  { x: 270, y: 6620, r: 88, open: "right" },
-];
+const C_TRAPS: CTrap[] = [];
 
 const S_CORRIDORS: SCorridor[] = [
-  { y: 4700, height: 470, amplitude: 170, phase: 0 },
-  { y: 5880, height: 500, amplitude: 155, phase: Math.PI },
-  { y: 6700, height: 420, amplitude: 135, phase: Math.PI / 2 },
+  { y: 2660, height: 1520, amplitude: 230, phase: 0 },
 ];
 
 const WIND_ZONES: WindZone[] = [
-  { y: 1460, height: 300, direction: "right", force: 0.035, label: "≫≫≫" },
-  { y: 2580, height: 320, direction: "left", force: 0.032, label: "≪≪≪" },
-  { y: 5300, height: 360, direction: "right", force: 0.03, label: "≫≫≫" },
-  { y: 6500, height: 320, direction: "left", force: 0.032, label: "≪≪≪" },
+  { y: 1260, height: 360, direction: "left", force: 0.027, label: "≪≪≪" },
+  { y: 5040, height: 420, direction: "right", force: 0.029, label: "≫≫≫" },
 ];
 
 const SECTION_LABELS: SectionLabel[] = [
   { title: "START", y: 85, tone: "start" },
-  { title: "랜덤 분기 A", y: 620, tone: "branch" },
-  { title: "회전 스피너 구간", y: 1440, tone: "spinner" },
-  { title: "랜덤 분기 B", y: 2260, tone: "branch" },
-  { title: "해머 구간", y: 3180, tone: "hammer" },
-  { title: "대형 점프 구간", y: 3970, tone: "jump" },
-  { title: "이동 플랫폼 구간", y: 4300, tone: "platform" },
-  { title: "랜덤 분기 C", y: 4860, tone: "branch" },
-  { title: "최종 경쟁 구간", y: 6250, tone: "branch" },
+  { title: "A / B / C", y: 760, tone: "branch" },
+  { title: "MERGE ZONE", y: 1900, tone: "spinner" },
+  { title: "S COURSE", y: 2660, tone: "branch" },
+  { title: "FAST / SAFE / CHAOS", y: 4180, tone: "branch" },
+  { title: "BOTTLENECK", y: 5700, tone: "hammer" },
+  { title: "SCRAMBLE", y: 6460, tone: "jump" },
   { title: "FINISH", y: FINISH_Y, tone: "finish" },
 ];
 
@@ -291,8 +475,12 @@ function createRaceBalls(participants: Participant[], raceSalt: number): RaceBal
       ...ball,
       x: center + offset,
       y: 120 - row * 24,
+      prevX: center + offset,
+      prevY: 120 - row * 24,
       vx: Math.sin(seed) * 0.7,
       vy: 0.75 + (index % 5) * 0.04,
+      angle: seed % (Math.PI * 2),
+      angularVelocity: 0,
       seed,
       branchChoices: Array(BRANCHES.length).fill(-1),
       jumpHits: Array(JUMP_ZONES.length).fill(false),
@@ -320,6 +508,66 @@ function getLineDistance(
   const py = y1 + t * dy;
 
   return { distance: Math.hypot(x - px, y - py), px, py };
+}
+
+function getSweptLineDistance(
+  ball: RaceBall,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+) {
+  const samples = Array.from({ length: CCD_SAMPLES }, (_, index) => {
+    const t = CCD_SAMPLES === 1 ? 1 : index / (CCD_SAMPLES - 1);
+    const x = ball.prevX + (ball.x - ball.prevX) * t;
+    const y = ball.prevY + (ball.y - ball.prevY) * t;
+
+    return getLineDistance(x, y, x1, y1, x2, y2);
+  });
+
+  return samples.reduce((closest, sample) =>
+    sample.distance < closest.distance ? sample : closest,
+  );
+}
+
+function getSweptMovingLineDistance(
+  ball: RaceBall,
+  previousLine: { x1: number; y1: number; x2: number; y2: number },
+  currentLine: { x1: number; y1: number; x2: number; y2: number },
+) {
+  const samples = Array.from({ length: CCD_SAMPLES }, (_, index) => {
+    const t = CCD_SAMPLES === 1 ? 1 : index / (CCD_SAMPLES - 1);
+    const x = ball.prevX + (ball.x - ball.prevX) * t;
+    const y = ball.prevY + (ball.y - ball.prevY) * t;
+    const x1 = previousLine.x1 + (currentLine.x1 - previousLine.x1) * t;
+    const y1 = previousLine.y1 + (currentLine.y1 - previousLine.y1) * t;
+    const x2 = previousLine.x2 + (currentLine.x2 - previousLine.x2) * t;
+    const y2 = previousLine.y2 + (currentLine.y2 - previousLine.y2) * t;
+
+    return getLineDistance(x, y, x1, y1, x2, y2);
+  });
+
+  return samples.reduce((closest, sample) =>
+    sample.distance < closest.distance ? sample : closest,
+  );
+}
+
+function getSweptCircleDistance(ball: RaceBall, x: number, y: number) {
+  const samples = Array.from({ length: CCD_SAMPLES }, (_, index) => {
+    const t = CCD_SAMPLES === 1 ? 1 : index / (CCD_SAMPLES - 1);
+    const sampleX = ball.prevX + (ball.x - ball.prevX) * t;
+    const sampleY = ball.prevY + (ball.y - ball.prevY) * t;
+
+    return {
+      distance: Math.hypot(sampleX - x, sampleY - y),
+      x: sampleX,
+      y: sampleY,
+    };
+  });
+
+  return samples.reduce((closest, sample) =>
+    sample.distance < closest.distance ? sample : closest,
+  );
 }
 
 function chooseBranch(ball: RaceBall, branchIndex: number, elapsed: number) {
@@ -353,9 +601,10 @@ function applyBranches(ball: RaceBall, elapsed: number) {
 }
 
 function collideWithBumper(ball: RaceBall, bumper: Bumper) {
-  const dx = ball.x - bumper.x;
-  const dy = ball.y - bumper.y;
-  const distance = Math.hypot(dx, dy);
+  const swept = getSweptCircleDistance(ball, bumper.x, bumper.y);
+  const dx = swept.x - bumper.x;
+  const dy = swept.y - bumper.y;
+  const distance = swept.distance;
   const minDistance = bumper.r + BALL_RADIUS;
 
   if (distance > 0 && distance < minDistance) {
@@ -365,14 +614,15 @@ function collideWithBumper(ball: RaceBall, bumper: Bumper) {
 
     ball.x = bumper.x + nx * minDistance;
     ball.y = bumper.y + ny * minDistance;
-    ball.vx = (ball.vx - 2 * dot * nx) * BUMPER_RESTITUTION + nx * 0.62;
-    ball.vy = Math.max(1.18, Math.abs(ball.vy - 2 * dot * ny) * 0.36 + 0.92);
+    ball.vx = (ball.vx - 2 * dot * nx) * (BUMPER_RESTITUTION + 0.08) + nx * 0.72;
+    ball.vy = Math.max(1.45, Math.abs(ball.vy - 2 * dot * ny) * 0.44 + 1.05);
+    ball.angularVelocity += (Math.abs(dot) + Math.hypot(ball.vx, ball.vy)) * 0.045;
   }
 }
 
 function applyGuideBars(ball: RaceBall) {
   GUIDE_BARS.forEach((bar) => {
-    const hit = getLineDistance(ball.x, ball.y, bar.x1, bar.y1, bar.x2, bar.y2);
+    const hit = getSweptLineDistance(ball, bar.x1, bar.y1, bar.x2, bar.y2);
 
     if (hit.distance > BALL_RADIUS + 8) {
       return;
@@ -386,10 +636,11 @@ function applyGuideBars(ball: RaceBall) {
     const nx = (ball.x - hit.px) / Math.max(1, hit.distance);
     const ny = (ball.y - hit.py) / Math.max(1, hit.distance);
 
-    ball.x += nx * 3.5;
-    ball.y += ny * 3.5;
-    ball.vx = ball.vx * 0.62 + tx * bar.force * 2.35 + nx * 0.16;
-    ball.vy = Math.max(1.25, ball.vy * 0.94 + Math.abs(ty) * bar.force * 7.5);
+    ball.x += nx * 2.8;
+    ball.y += ny * 2.8;
+    ball.vx = ball.vx * 0.8 + tx * bar.force * 3.1 + nx * 0.14;
+    ball.vy = Math.max(1.5, ball.vy * 0.985 + Math.abs(ty) * bar.force * 8.8 + 0.14);
+    ball.angularVelocity += (tx * ball.vx + ty * ball.vy) * 0.07;
   });
 }
 
@@ -454,14 +705,21 @@ function applyWindZones(ball: RaceBall) {
 function applySpinners(ball: RaceBall, elapsed: number) {
   SPINNERS.forEach((spinner) => {
     const angle = elapsed * spinner.speed;
+    const previousAngle = (elapsed - PHYSICS_STEP) * spinner.speed;
     const half = spinner.length / 2;
+    const previousLine = {
+      x1: spinner.x - Math.cos(previousAngle) * half,
+      y1: spinner.y - Math.sin(previousAngle) * half,
+      x2: spinner.x + Math.cos(previousAngle) * half,
+      y2: spinner.y + Math.sin(previousAngle) * half,
+    };
     const x1 = spinner.x - Math.cos(angle) * half;
     const y1 = spinner.y - Math.sin(angle) * half;
     const x2 = spinner.x + Math.cos(angle) * half;
     const y2 = spinner.y + Math.sin(angle) * half;
-    const hit = getLineDistance(ball.x, ball.y, x1, y1, x2, y2);
+    const hit = getSweptMovingLineDistance(ball, previousLine, { x1, y1, x2, y2 });
 
-    if (hit.distance > BALL_RADIUS + 13) {
+    if (hit.distance > BALL_RADIUS + 18) {
       return;
     }
 
@@ -469,21 +727,35 @@ function applySpinners(ball: RaceBall, elapsed: number) {
     const ny = (ball.y - hit.py) / Math.max(1, hit.distance);
     const tangential = spinner.speed > 0 ? 1 : -1;
 
-    ball.x += nx * 6;
-    ball.y += ny * 6;
-    ball.vx += nx * 0.28 - Math.sin(angle) * tangential * 0.36;
-    ball.vy += Math.abs(ny) * 0.95 + 0.28;
+    ball.x += nx * 4.5;
+    ball.y += ny * 4.5;
+    ball.vx += nx * 0.44 - Math.sin(angle) * tangential * 0.52;
+    ball.vy += Math.abs(ny) * 1.18 + 0.42;
+    ball.angularVelocity += tangential * 0.38;
   });
 }
 
 function applyHammers(ball: RaceBall, elapsed: number) {
   HAMMERS.forEach((hammer) => {
     const angle = Math.sin(elapsed * hammer.speed + hammer.phase) * 1.35 + Math.PI / 2;
+    const previousAngle =
+      Math.sin((elapsed - PHYSICS_STEP) * hammer.speed + hammer.phase) * 1.35 + Math.PI / 2;
+    const previousLine = {
+      x1: hammer.x,
+      y1: hammer.y,
+      x2: hammer.x + Math.cos(previousAngle) * hammer.length,
+      y2: hammer.y + Math.sin(previousAngle) * hammer.length,
+    };
     const x2 = hammer.x + Math.cos(angle) * hammer.length;
     const y2 = hammer.y + Math.sin(angle) * hammer.length;
-    const hit = getLineDistance(ball.x, ball.y, hammer.x, hammer.y, x2, y2);
+    const hit = getSweptMovingLineDistance(ball, previousLine, {
+      x1: hammer.x,
+      y1: hammer.y,
+      x2,
+      y2,
+    });
 
-    if (hit.distance > BALL_RADIUS + 15) {
+    if (hit.distance > BALL_RADIUS + 20) {
       return;
     }
 
@@ -491,28 +763,44 @@ function applyHammers(ball: RaceBall, elapsed: number) {
     const nx = (ball.x - hit.px) / Math.max(1, hit.distance);
     const ny = (ball.y - hit.py) / Math.max(1, hit.distance);
 
-    ball.x += nx * 8;
-    ball.y += ny * 8;
-    ball.vx += nx * 0.45 + swing * 0.1;
-    ball.vy = Math.max(1.05, ball.vy * 0.62 + Math.abs(swing) * 0.22);
+    ball.x += nx * 5.5;
+    ball.y += ny * 5.5;
+    ball.vx += nx * 0.68 + swing * 0.15;
+    ball.vy = Math.max(1.35, ball.vy * 0.72 + Math.abs(swing) * 0.3);
+    ball.angularVelocity += swing * 0.04;
   });
 }
 
 function applyPlatforms(ball: RaceBall, elapsed: number) {
   PLATFORMS.forEach((platform) => {
     const centerX = MAP_WIDTH / 2 + Math.sin(elapsed * platform.speed + platform.phase) * 250;
+    const previousCenterX =
+      MAP_WIDTH / 2 + Math.sin((elapsed - PHYSICS_STEP) * platform.speed + platform.phase) * 250;
     const left = centerX - platform.width / 2;
     const right = centerX + platform.width / 2;
-    const closeY = Math.abs(ball.y - platform.y) < 22;
-    const onPlatform = ball.x > left - BALL_RADIUS && ball.x < right + BALL_RADIUS;
+    const sweptTop = getSweptMovingLineDistance(
+      ball,
+      {
+        x1: previousCenterX - platform.width / 2,
+        y1: platform.y,
+        x2: previousCenterX + platform.width / 2,
+        y2: platform.y,
+      },
+      { x1: left, y1: platform.y, x2: right, y2: platform.y },
+    );
+    const closeY = sweptTop.distance < BALL_RADIUS + 12;
+    const onPlatform =
+      ball.x > Math.min(left, previousCenterX - platform.width / 2) - BALL_RADIUS &&
+      ball.x < Math.max(right, previousCenterX + platform.width / 2) + BALL_RADIUS;
 
     if (!closeY || !onPlatform || ball.vy < 0) {
       return;
     }
 
     ball.y = platform.y - 23;
-    ball.vy *= 0.18;
-    ball.vx += Math.cos(elapsed * platform.speed + platform.phase) * platform.speed * 45;
+    ball.vy *= 0.24;
+    ball.vx += Math.cos(elapsed * platform.speed + platform.phase) * platform.speed * 62;
+    ball.angularVelocity += (centerX - previousCenterX) * 0.032;
 
     if (Math.abs(ball.x - centerX) < platform.width * 0.18) {
       ball.vy += 0.15;
@@ -562,14 +850,14 @@ function applyAutoEscape(ball: RaceBall, elapsed: number) {
     return;
   }
 
-  if (elapsed - ball.stuckSince < 2400) {
+  if (elapsed - ball.stuckSince < 2000) {
     return;
   }
 
   const push = ball.x < MAP_WIDTH / 2 ? 1 : -1;
 
   ball.vx += push * 0.35;
-  ball.vy = Math.max(ball.vy, 3);
+  ball.vy = Math.max(ball.vy, 3.3);
   ball.y += 12;
   ball.lastX = ball.x;
   ball.lastY = ball.y;
@@ -581,6 +869,8 @@ function advanceBall(ball: RaceBall, elapsed: number) {
     return;
   }
 
+  ball.prevX = ball.x;
+  ball.prevY = ball.y;
   ball.vy += GRAVITY;
   applyBranches(ball, elapsed);
   applyRaceFlow(ball);
@@ -604,21 +894,24 @@ function advanceBall(ball: RaceBall, elapsed: number) {
     ball.vy = Math.max(ball.vy, 1.6);
   }
 
-  BUMPERS.forEach((bumper) => collideWithBumper(ball, bumper));
-  applyGuideBars(ball);
-  applySpinners(ball, elapsed);
-  applyHammers(ball, elapsed);
-  applyPlatforms(ball, elapsed);
-  applyJumpZones(ball);
-  applyCTraps(ball);
-  applyAutoEscape(ball, elapsed);
-
-  if (elapsed > 65000) {
-    ball.vy = Math.max(ball.vy, 2.5);
+  for (let iteration = 0; iteration < SOLVER_ITERATIONS; iteration += 1) {
+    BUMPERS.forEach((bumper) => collideWithBumper(ball, bumper));
+    applyGuideBars(ball);
+    applySpinners(ball, elapsed);
+    applyHammers(ball, elapsed);
+    applyPlatforms(ball, elapsed);
+    applyJumpZones(ball);
+    applyCTraps(ball);
   }
 
-  if (elapsed > 75000) {
-    ball.y += 1.6;
+  applyAutoEscape(ball, elapsed);
+
+  if (elapsed > 36000) {
+    ball.vy = Math.max(ball.vy, 3.1);
+  }
+
+  if (elapsed > 45000) {
+    ball.y += 1.4;
     ball.vx *= 0.98;
   }
 
@@ -626,7 +919,7 @@ function advanceBall(ball: RaceBall, elapsed: number) {
     ball.vx = Math.sign(ball.vx) * MAX_HORIZONTAL_SPEED;
   }
 
-  if (Math.abs(ball.vx) < 0.025) {
+  if (Math.abs(ball.vx) < MICRO_VELOCITY_EPSILON) {
     ball.vx = 0;
   }
 
@@ -641,6 +934,14 @@ function advanceBall(ball: RaceBall, elapsed: number) {
   if (ball.vy > -0.2 && ball.vy < 1) {
     ball.vy = 1;
   }
+
+  const rollingSpeed = Math.hypot(ball.vx, ball.vy);
+  const rollingDirection = ball.vx >= 0 ? 1 : -1;
+  ball.angularVelocity =
+    ball.angularVelocity * ANGULAR_DAMPING +
+    (rollingSpeed / BALL_RADIUS) * 0.32 * rollingDirection;
+  ball.angularVelocity *= ROLLING_RESISTANCE;
+  ball.angle += ball.angularVelocity;
 
   if (ball.y >= FINISH_Y) {
     ball.y = FINISH_Y;
@@ -675,14 +976,36 @@ function getRankings(balls: RaceBall[]): RankEntry[] {
     }));
 }
 
-function getCameraTargetY(balls: RaceBall[]) {
-  const leader = getRankings(balls).find((entry) => entry.finishedAt === null);
+function getCameraTargetY(rankings: RankEntry[]) {
+  const activeTopFive = rankings.filter((entry) => entry.finishedAt === null).slice(0, 5);
 
-  if (!leader) {
+  if (activeTopFive.length === 0) {
     return MAP_HEIGHT - VIEW_HEIGHT;
   }
 
-  return Math.min(Math.max(leader.y - VIEW_HEIGHT * 0.5, 0), MAP_HEIGHT - VIEW_HEIGHT);
+  const averageY =
+    activeTopFive.reduce((sum, entry) => sum + entry.y, 0) / activeTopFive.length;
+
+  return Math.min(
+    Math.max(averageY - VIEW_HEIGHT * CAMERA_VIEW_ANCHOR, 0),
+    MAP_HEIGHT - VIEW_HEIGHT,
+  );
+}
+
+function getNextCameraY(currentY: number, targetY: number) {
+  const gap = targetY - currentY;
+
+  if (Math.abs(gap) <= CAMERA_DEADZONE) {
+    return currentY;
+  }
+
+  const deadzoneEdgeTarget = targetY - Math.sign(gap) * CAMERA_DEADZONE;
+  const step = Math.max(
+    -CAMERA_MAX_STEP,
+    Math.min(CAMERA_MAX_STEP, (deadzoneEdgeTarget - currentY) * CAMERA_FOLLOW),
+  );
+
+  return Math.min(Math.max(currentY + step, 0), MAP_HEIGHT - VIEW_HEIGHT);
 }
 
 function getElapsedSeconds(records: FinishRecord[]) {
@@ -746,6 +1069,69 @@ function getDeltaText(delta: number | undefined) {
   return delta > 0 ? `▲ +${delta}` : `▼ ${delta}`;
 }
 
+function RaceStatusBar({
+  cameraMode,
+  finishCount,
+  rankDeltas,
+  topFive,
+  totalCount,
+}: {
+  cameraMode: CameraMode;
+  finishCount: number;
+  rankDeltas: Record<string, number>;
+  topFive: RankEntry[];
+  totalCount: number;
+}) {
+  const leader = topFive[0];
+  const biggestMove = topFive.reduce<{ label: string; delta: number } | null>((best, entry) => {
+    const delta = rankDeltas[entry.id] ?? 0;
+
+    if (Math.abs(delta) <= Math.abs(best?.delta ?? 0)) {
+      return best;
+    }
+
+    return { label: entry.label, delta };
+  }, null);
+  const remaining = Math.max(0, totalCount - finishCount);
+
+  return (
+    <section className="grid gap-2 rounded-lg border border-black/15 bg-[#111827] p-3 text-white shadow-sm sm:grid-cols-5">
+      <div className="rounded-md bg-white/10 px-3 py-2">
+        <p className="text-[10px] font-black uppercase tracking-[0.14em] text-white/55">Leader</p>
+        <p className="mt-1 truncate text-sm font-black text-[#facc15]">
+          {leader ? leader.label : "-"}
+        </p>
+      </div>
+      <div className="rounded-md bg-white/10 px-3 py-2">
+        <p className="text-[10px] font-black uppercase tracking-[0.14em] text-white/55">Move</p>
+        <p className="mt-1 truncate text-sm font-black text-[#fb7185]">
+          {biggestMove
+            ? `${biggestMove.label} ${biggestMove.delta > 0 ? "+" : ""}${biggestMove.delta}`
+            : "-"}
+        </p>
+      </div>
+      <div className="rounded-md bg-white/10 px-3 py-2">
+        <p className="text-[10px] font-black uppercase tracking-[0.14em] text-white/55">
+          Remaining
+        </p>
+        <p className="mt-1 text-sm font-black">{remaining}</p>
+      </div>
+      <div className="rounded-md bg-white/10 px-3 py-2">
+        <p className="text-[10px] font-black uppercase tracking-[0.14em] text-white/55">Map</p>
+        <p className="mt-1 text-sm font-black">CLASSIC TRACK</p>
+      </div>
+      <div className="rounded-md bg-white/10 px-3 py-2">
+        <p className="text-[10px] font-black uppercase tracking-[0.14em] text-white/55">
+          Camera
+        </p>
+        <p className="mt-1 text-sm font-black">
+          {cameraMode === "follow" ? "FOLLOW TOP5" : "FIXED TEST"}
+        </p>
+      </div>
+    </section>
+  );
+}
+
 export default function Home() {
   const [participants, setParticipants] = useState<Participant[]>([
     { id: 1, name: "철수", count: 5 },
@@ -764,11 +1150,14 @@ export default function Home() {
   const [rankDeltas, setRankDeltas] = useState<Record<string, number>>({});
   const [events, setEvents] = useState<RaceEvent[]>([]);
   const [leaderSpotlight, setLeaderSpotlight] = useState<LeaderSpotlight>(null);
+  const [cameraMode, setCameraMode] = useState<CameraMode>("follow");
 
   const frameRef = useRef<number | null>(null);
   const ballsRef = useRef<RaceBall[]>([]);
   const finishRecordsRef = useRef<FinishRecord[]>([]);
   const cameraYRef = useRef(0);
+  const cameraTargetYRef = useRef(0);
+  const cameraModeRef = useRef<CameraMode>("follow");
   const startTimeRef = useRef(0);
   const lastFrameTimeRef = useRef(0);
   const physicsAccumulatorRef = useRef(0);
@@ -790,6 +1179,7 @@ export default function Home() {
   const selectedRecord =
     mode === "WINNER" ? finishRecords[0] : finishRecords[finishRecords.length - 1];
   const topFive = rankings.slice(0, 5);
+  const leaderDebugBall = balls.find((ball) => ball.id === topFive[0]?.id) ?? null;
   const activeSpotlight =
     leaderSpotlight && raceElapsed <= leaderSpotlight.until ? leaderSpotlight : null;
 
@@ -824,6 +1214,7 @@ export default function Home() {
     ballsRef.current = nextBalls.map((ball) => ({ ...ball }));
     finishRecordsRef.current = [];
     cameraYRef.current = 0;
+    cameraTargetYRef.current = 0;
     lastFrameTimeRef.current = 0;
     physicsAccumulatorRef.current = 0;
     physicsElapsedRef.current = 0;
@@ -831,6 +1222,7 @@ export default function Home() {
     previousLeaderRef.current = initialRankings[0]?.id ?? null;
     lastRankSampleRef.current = 0;
     focusCooldownRef.current = 0;
+    cameraModeRef.current = cameraMode;
     setBalls(nextBalls);
     setFinishRecords([]);
     setCameraY(0);
@@ -850,12 +1242,19 @@ export default function Home() {
     setScreen("setup");
     setBalls([]);
     setFinishRecords([]);
+    cameraYRef.current = 0;
+    cameraTargetYRef.current = 0;
     setCameraY(0);
     setRaceElapsed(0);
     setRankings([]);
     setRankDeltas({});
     setEvents([]);
     setLeaderSpotlight(null);
+  }
+
+  function changeCameraMode(mode: CameraMode) {
+    cameraModeRef.current = mode;
+    setCameraMode(mode);
   }
 
   useEffect(() => {
@@ -898,10 +1297,11 @@ export default function Home() {
       const elapsed = physicsElapsedRef.current;
 
       const currentRankings = getRankings(ballsRef.current);
-      const targetCameraY = getCameraTargetY(ballsRef.current);
-      const cameraGap = targetCameraY - cameraYRef.current;
-      if (Math.abs(cameraGap) > CAMERA_DEADZONE) {
-        cameraYRef.current += cameraGap * CAMERA_FOLLOW;
+      if (cameraModeRef.current === "follow") {
+        const rawCameraTargetY = getCameraTargetY(currentRankings);
+        cameraTargetYRef.current +=
+          (rawCameraTargetY - cameraTargetYRef.current) * CAMERA_TARGET_SMOOTHING;
+        cameraYRef.current = getNextCameraY(cameraYRef.current, cameraTargetYRef.current);
       }
 
       const leaderBall = ballsRef.current.find((ball) => ball.id === currentRankings[0]?.id);
@@ -1004,7 +1404,7 @@ export default function Home() {
         <header className="flex flex-wrap items-end justify-between gap-4 border-b border-black/15 pb-4">
           <div>
             <p className="text-sm font-semibold uppercase text-[#b91c1c]">
-              Sprint 2.2
+              Classic Blueprint v1
             </p>
             <h1 className="mt-1 text-3xl font-black sm:text-4xl">
               AI 자동 중계 핀볼 레이스 쇼
@@ -1133,17 +1533,28 @@ export default function Home() {
         {screen === "race" && (
           <section className="grid flex-1 gap-6 lg:grid-cols-[1fr_320px]">
             <div className="grid gap-3">
+              <RaceStatusBar
+                cameraMode={cameraMode}
+                finishCount={finishRecords.length}
+                rankDeltas={rankDeltas}
+                topFive={topFive}
+                totalCount={balls.length}
+              />
               <RaceMap
                 balls={balls}
                 cameraY={cameraY}
                 elapsed={raceElapsed}
+                leaderId={topFive[0]?.id ?? null}
                 spotlight={activeSpotlight}
               />
               <EventLog events={events} />
             </div>
             <RaceHud
               ballCount={balls.length}
+              cameraMode={cameraMode}
               finishCount={finishRecords.length}
+              leaderDebugBall={leaderDebugBall}
+              onCameraModeChange={changeCameraMode}
               participantCount={participants.length}
               rankDeltas={rankDeltas}
               topFive={topFive}
@@ -1203,13 +1614,19 @@ export default function Home() {
 
 function RaceHud({
   ballCount,
+  cameraMode,
   finishCount,
+  leaderDebugBall,
+  onCameraModeChange,
   participantCount,
   rankDeltas,
   topFive,
 }: {
   ballCount: number;
+  cameraMode: CameraMode;
   finishCount: number;
+  leaderDebugBall: RaceBall | null;
+  onCameraModeChange: (mode: CameraMode) => void;
   participantCount: number;
   rankDeltas: Record<string, number>;
   topFive: RankEntry[];
@@ -1220,10 +1637,18 @@ function RaceHud({
       <ol className="mt-4 grid gap-2">
         {topFive.map((entry) => {
           const delta = rankDeltas[entry.id];
+          const isLeader = entry.rank === 1;
+          const isTopThree = entry.rank <= 3;
 
           return (
             <li
-              className="grid grid-cols-[32px_1fr_58px] items-center gap-2 rounded-md border border-black/10 bg-[#f8fafc] px-3 py-2"
+              className={`grid grid-cols-[32px_1fr_58px] items-center gap-2 rounded-md border px-3 py-2 transition ${
+                isLeader
+                  ? "border-[#facc15] bg-[#fef3c7] shadow-[0_0_0_2px_rgba(250,204,21,0.35)]"
+                  : isTopThree
+                    ? "border-[#2563eb]/30 bg-[#dbeafe]"
+                    : "border-black/10 bg-[#f8fafc]"
+              }`}
               key={entry.id}
             >
               <span className="text-lg font-black">{entry.rank}</span>
@@ -1270,6 +1695,40 @@ function RaceHud({
           <dd className="text-sm font-black text-[#b91c1c]">선두 추적</dd>
         </div>
       </dl>
+
+      <div className="mt-4 rounded-md border border-black/10 bg-[#f8fafc] p-3">
+        <p className="text-xs font-black text-black/55">떨림 테스트</p>
+        <div className="mt-2 grid grid-cols-2 gap-2">
+          <button
+            className={`h-9 rounded text-xs font-black ${
+              cameraMode === "follow" ? "bg-[#171717] text-white" : "bg-white text-black/65"
+            }`}
+            type="button"
+            onClick={() => onCameraModeChange("follow")}
+          >
+            CAMERA ON
+          </button>
+          <button
+            className={`h-9 rounded text-xs font-black ${
+              cameraMode === "fixed" ? "bg-[#171717] text-white" : "bg-white text-black/65"
+            }`}
+            type="button"
+            onClick={() => onCameraModeChange("fixed")}
+          >
+            CAMERA OFF
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-4 rounded-md border border-black/10 bg-[#f8fafc] p-3">
+        <p className="text-xs font-black text-black/55">물리 디버그</p>
+        <div className="mt-2 grid grid-cols-2 gap-2 text-xs font-black text-black/65">
+          <span>v {leaderDebugBall ? Math.hypot(leaderDebugBall.vx, leaderDebugBall.vy).toFixed(2) : "-"}</span>
+          <span>
+            av {leaderDebugBall ? leaderDebugBall.angularVelocity.toFixed(2) : "-"}
+          </span>
+        </div>
+      </div>
     </aside>
   );
 }
@@ -1311,11 +1770,13 @@ function RaceMap({
   balls,
   cameraY,
   elapsed,
+  leaderId,
   spotlight,
 }: {
   balls: RaceBall[];
   cameraY: number;
   elapsed: number;
+  leaderId: string | null;
   spotlight: LeaderSpotlight;
 }) {
   const zoom = spotlight ? 1.16 : 1;
@@ -1348,6 +1809,61 @@ function RaceMap({
 
           <div className="absolute left-[62px] top-0 h-full w-4 bg-[#171717]" />
           <div className="absolute right-[62px] top-0 h-full w-4 bg-[#171717]" />
+
+          <svg
+            className="pointer-events-none absolute left-0 top-0 h-full w-full"
+            viewBox={`0 0 ${MAP_WIDTH} ${MAP_HEIGHT}`}
+          >
+            {TRACK_PATHS.map((path) => (
+              <g key={path.title}>
+                <path
+                  d={path.d}
+                  fill="none"
+                  stroke="rgba(17,24,39,0.42)"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={path.width + 18}
+                />
+                <path
+                  d={path.d}
+                  fill="none"
+                  stroke={path.color}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeOpacity={0.7}
+                  strokeWidth={path.width}
+                />
+                <path
+                  d={path.d}
+                  fill="none"
+                  stroke="rgba(255,255,255,0.72)"
+                  strokeDasharray="22 22"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={4}
+                />
+              </g>
+            ))}
+          </svg>
+
+          {TRACK_ZONES.map((zone) => (
+            <div
+              className="absolute rounded-lg border-[5px] px-3 py-3 text-center shadow-[inset_0_0_0_2px_rgba(255,255,255,0.72)]"
+              key={`${zone.title}-${zone.y}`}
+              style={{
+                background: zone.background,
+                borderColor: zone.border,
+                color: zone.text,
+                height: zone.height,
+                left: zone.x,
+                top: zone.y,
+                width: zone.width,
+              }}
+            >
+              <p className="text-3xl font-black leading-none">{zone.title}</p>
+              <p className="mt-1 text-[11px] font-black tracking-[0.12em]">{zone.subtitle}</p>
+            </div>
+          ))}
 
           {S_CORRIDORS.map((corridor, index) => (
             <div
@@ -1394,7 +1910,7 @@ function RaceMap({
 
           {GUIDE_BARS.map((bar, index) => (
             <div
-              className="absolute h-5 origin-left rounded-full bg-[#334155] shadow-[0_0_0_4px_rgba(51,65,85,0.18)]"
+              className="absolute h-4 origin-left rounded-full bg-[#64748b]/70 shadow-[0_0_0_3px_rgba(100,116,139,0.12)]"
               key={`${bar.x1}-${bar.y1}-${index}`}
               style={{
                 left: bar.x1,
@@ -1407,11 +1923,11 @@ function RaceMap({
 
           {C_TRAPS.map((trap, index) => (
             <div
-              className="absolute rounded-full border-[14px] border-[#9333ea] bg-[#f3e8ff]/45"
+              className="absolute rounded-full border-[10px] border-[#8b5cf6]/70 bg-[#f3e8ff]/25"
               key={`${trap.x}-${trap.y}-${index}`}
               style={{
-                borderLeftColor: trap.open === "left" ? "transparent" : "#9333ea",
-                borderRightColor: trap.open === "right" ? "transparent" : "#9333ea",
+                borderLeftColor: trap.open === "left" ? "transparent" : "rgba(139,92,246,0.7)",
+                borderRightColor: trap.open === "right" ? "transparent" : "rgba(139,92,246,0.7)",
                 height: trap.r * 2,
                 left: trap.x - trap.r,
                 top: trap.y - trap.r,
@@ -1422,7 +1938,7 @@ function RaceMap({
 
           {JUMP_ZONES.map((zone, index) => (
             <div
-              className="absolute rounded-md border-4 border-[#2563eb] bg-[#bfdbfe] text-center text-xs font-black leading-8 text-[#1d4ed8]"
+              className="absolute rounded-md border-2 border-[#2563eb]/60 bg-[#bfdbfe]/45 text-center text-xs font-black leading-8 text-[#1d4ed8]/80"
               key={`${zone.x}-${zone.y}`}
               style={{ height: 42, left: zone.x, top: zone.y, width: zone.width }}
             >
@@ -1436,7 +1952,7 @@ function RaceMap({
 
             return (
               <div
-                className="absolute h-8 rounded-md border-4 border-[#171717] bg-[#94a3b8]"
+                className="absolute h-7 rounded-md border-2 border-[#334155]/70 bg-[#94a3b8]/70"
                 key={`${platform.y}-${index}`}
                 style={{
                   left: centerX - platform.width / 2,
@@ -1471,7 +1987,7 @@ function RaceMap({
 
           {SPINNERS.map((spinner, index) => (
             <div
-              className="absolute h-5 origin-center rounded-full bg-[#0891b2] shadow-[0_0_0_5px_rgba(8,145,178,0.25)]"
+              className="absolute h-4 origin-center rounded-full bg-[#0891b2]/65 shadow-[0_0_0_4px_rgba(8,145,178,0.14)]"
               key={`${spinner.y}-${index}`}
               style={{
                 left: spinner.x - spinner.length / 2,
@@ -1488,7 +2004,7 @@ function RaceMap({
 
             return (
               <div
-                className="absolute h-6 origin-left rounded-full bg-[#7c2d12]"
+                className="absolute h-5 origin-left rounded-full bg-[#92400e]/70"
                 key={`${hammer.y}-${index}`}
                 style={{
                   left: hammer.x,
@@ -1502,7 +2018,7 @@ function RaceMap({
 
           {BUMPERS.map((bumper, index) => (
             <div
-              className="absolute rounded-full border-4 border-[#171717] bg-[#ffd166] shadow-[inset_0_0_0_8px_rgba(255,255,255,0.45)]"
+              className="absolute rounded-full border-2 border-[#334155]/55 bg-[#fde68a]/70 shadow-[inset_0_0_0_6px_rgba(255,255,255,0.34)]"
               key={`${bumper.x}-${bumper.y}-${index}`}
               style={{
                 height: bumper.r * 2,
@@ -1513,25 +2029,47 @@ function RaceMap({
             />
           ))}
 
-          {balls.map((ball) => (
-            <div
-              className="absolute z-20 flex items-center gap-1"
-              key={ball.id}
-              style={{
-                left: ball.x - BALL_RADIUS * 0.9,
-                top: ball.y - BALL_RADIUS * 0.68,
-              }}
-              title={ball.label}
-            >
-              <span
-                className="h-6 w-6 shrink-0 rounded-full shadow-[0_0_0_2px_rgba(255,255,255,0.9),0_2px_5px_rgba(0,0,0,0.28)]"
-                style={{ background: ball.color }}
-              />
-              <span className="max-w-[46px] truncate text-[12px] font-black leading-none text-[#171717] drop-shadow-[0_1px_1px_rgba(255,255,255,0.95)]">
-                {ball.owner}
-              </span>
-            </div>
-          ))}
+          {balls.map((ball) => {
+            const isLeader = ball.id === leaderId;
+
+            return (
+              <div
+                className={`absolute flex items-center gap-1.5 ${isLeader ? "z-30" : "z-20"}`}
+                key={ball.id}
+                style={{
+                  left: ball.x - VISUAL_BALL_SIZE * 0.42,
+                  top: ball.y - VISUAL_BALL_SIZE * 0.3,
+                }}
+                title={ball.label}
+              >
+                <span
+                  className={`relative h-11 w-11 shrink-0 overflow-hidden rounded-full ${
+                    isLeader
+                      ? "shadow-[0_0_0_4px_rgba(250,204,21,0.95),0_0_22px_rgba(250,204,21,0.85),0_4px_12px_rgba(0,0,0,0.55)]"
+                      : "shadow-[0_0_0_2px_rgba(255,255,255,0.95),0_3px_9px_rgba(0,0,0,0.52)]"
+                  }`}
+                  style={{
+                    background: `radial-gradient(circle at 27% 23%, rgba(255,255,255,1), ${ball.color} 30%, rgba(23,23,23,0.72) 100%)`,
+                    transform: `rotate(${ball.angle}rad)`,
+                  }}
+                >
+                  <span className="absolute left-1/2 top-[-5px] h-[52px] w-[8px] -translate-x-1/2 rounded-full bg-white/95 shadow-[0_0_0_1px_rgba(0,0,0,0.38)]" />
+                  <span className="absolute left-[6px] top-1/2 h-[26px] w-[5px] -translate-y-1/2 rounded-full bg-black/45" />
+                  <span className="absolute right-[7px] top-1/2 h-[16px] w-[4px] -translate-y-1/2 rounded-full bg-white/55" />
+                  <span className="absolute left-1/2 top-1/2 h-[11px] w-[11px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-black/62 shadow-[0_0_0_1px_rgba(255,255,255,0.48)]" />
+                </span>
+                <span
+                  className={`max-w-[82px] truncate rounded-sm px-1 text-[13px] font-black leading-5 ${
+                    isLeader
+                      ? "bg-[#facc15] text-[#171717] shadow-[0_2px_6px_rgba(0,0,0,0.28)]"
+                      : "bg-white/75 text-[#171717] shadow-[0_1px_3px_rgba(0,0,0,0.24)]"
+                  }`}
+                >
+                  {ball.label}
+                </span>
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>

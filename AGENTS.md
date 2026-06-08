@@ -100,3 +100,17 @@
 - `다음_작업.md` 갱신 완료
 - `작업요약.md` 갱신 완료
 - `작업기록/` 기록 작성 완료
+
+## 클래식 맵 기준 디자인
+
+design/classic-map-concept-v1.png
+
+모든 맵 수정 작업은
+해당 디자인 시안을 우선 기준으로 한다.
+
+- A/B/C 초반 분기
+- MERGE 구간
+- S COURSE
+- FAST / SAFE / CHAOS
+- BOTTLENECK
+- SCRAMBLE
